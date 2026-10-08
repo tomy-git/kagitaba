@@ -1,5 +1,8 @@
-#[cfg(target_os = "macos")]
-use std::collections::BTreeSet;
+#[cfg(any(target_os = "macos", test))]
+use std::collections::{BTreeSet, HashMap};
+
+#[cfg(any(target_os = "macos", test))]
+mod query;
 
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -12,9 +15,9 @@ const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
 #[cfg(target_os = "macos")]
 const ERR_SEC_INTERACTION_REQUIRED: i32 = -25315;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const SERVICE_NAME: &str = "dev.kagitaba.kagitaba";
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const INDEX_ACCOUNT: &str = "__kagitaba_index__";
 
 pub struct Secret(Zeroizing<String>);
@@ -38,13 +41,16 @@ impl Secret {
 pub trait CredentialStore {
     fn exists(&self, env_name: &str) -> Result<bool, StoreError>;
     fn get(&self, env_name: &str) -> Result<Secret, StoreError>;
-    fn set(&self, env_name: &str, secret: &Secret) -> Result<(), StoreError>;
+    fn create(&self, env_name: &str, secret: &Secret) -> Result<(), StoreError>;
+    fn replace(&self, env_name: &str, secret: &Secret) -> Result<(), StoreError>;
     fn delete(&self, env_name: &str) -> Result<bool, StoreError>;
     fn list_names(&self) -> Result<Vec<String>, StoreError>;
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum StoreError {
+    #[error("credential already exists")]
+    AlreadyExists,
     #[error("credential not found")]
     NotFound,
     #[error("access to keychain was denied")]
@@ -83,7 +89,11 @@ impl CredentialStore for UnsupportedStore {
         Err(StoreError::UnsupportedPlatform)
     }
 
-    fn set(&self, _: &str, _: &Secret) -> Result<(), StoreError> {
+    fn create(&self, _: &str, _: &Secret) -> Result<(), StoreError> {
+        Err(StoreError::UnsupportedPlatform)
+    }
+
+    fn replace(&self, _: &str, _: &Secret) -> Result<(), StoreError> {
         Err(StoreError::UnsupportedPlatform)
     }
 
@@ -119,8 +129,7 @@ impl MacosKeychainStore {
 impl CredentialStore for MacosKeychainStore {
     fn exists(&self, env_name: &str) -> Result<bool, StoreError> {
         self.with_keychain(|keychain| {
-            let mut query = password_query(keychain, Some(env_name));
-            query.load_attributes(true);
+            let query = password_query(keychain, query::Purpose::Exists(env_name));
             match query.search() {
                 Ok(_) => Ok(true),
                 Err(err) => match map_sec_error(err) {
@@ -135,22 +144,33 @@ impl CredentialStore for MacosKeychainStore {
         self.with_keychain(|keychain| read_password(keychain, env_name))
     }
 
-    fn set(&self, env_name: &str, secret: &Secret) -> Result<(), StoreError> {
-        self.with_keychain(|keychain| write_password(keychain, env_name, secret))
+    fn create(&self, env_name: &str, secret: &Secret) -> Result<(), StoreError> {
+        self.with_keychain(|keychain| {
+            keychain
+                .add_generic_password(SERVICE_NAME, env_name, secret.expose().as_bytes())
+                .map_err(map_sec_error)
+        })
+    }
+
+    fn replace(&self, env_name: &str, secret: &Secret) -> Result<(), StoreError> {
+        self.with_keychain(|keychain| {
+            let (_, mut item) = keychain
+                .find_generic_password(SERVICE_NAME, env_name)
+                .map_err(map_sec_error)?;
+            item.set_password(secret.expose().as_bytes())
+                .map_err(map_sec_error)
+        })
     }
 
     fn delete(&self, env_name: &str) -> Result<bool, StoreError> {
         self.with_keychain(|keychain| {
-            deletion_result(password_query(keychain, Some(env_name)).delete())
+            deletion_result(password_query(keychain, query::Purpose::Delete(env_name)).delete())
         })
     }
 
     fn list_names(&self) -> Result<Vec<String>, StoreError> {
-        use security_framework::item::Limit;
-
         self.with_keychain(|keychain| {
-            let mut query = password_query(keychain, None);
-            query.load_attributes(true).limit(Limit::All);
+            let query = password_query(keychain, query::Purpose::List);
             let items = match query.search() {
                 Ok(items) => items,
                 Err(err) => match map_sec_error(err) {
@@ -158,37 +178,35 @@ impl CredentialStore for MacosKeychainStore {
                     err => return Err(err),
                 },
             };
-            let mut names = BTreeSet::new();
-            for item in items {
-                let mut attributes = item.simplify_dict().ok_or(StoreError::Backend)?;
-                let account = attributes.remove("acct").ok_or(StoreError::Backend)?;
-                // Older versions stored a separate index in this reserved account.
-                if account != INDEX_ACCOUNT {
-                    names.insert(account);
-                }
-            }
-            Ok(names.into_iter().collect())
+            extract_names(items.into_iter().map(|item| item.simplify_dict()))
         })
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn extract_names(
+    items: impl IntoIterator<Item = Option<HashMap<String, String>>>,
+) -> Result<Vec<String>, StoreError> {
+    let mut names = BTreeSet::new();
+    for item in items {
+        let mut attributes = item.ok_or(StoreError::Backend)?;
+        let account = attributes.remove("acct").ok_or(StoreError::Backend)?;
+        // Older versions stored a separate index in this reserved account.
+        if account != INDEX_ACCOUNT {
+            names.insert(account);
+        }
+    }
+    Ok(names.into_iter().collect())
 }
 
 #[cfg(target_os = "macos")]
 fn password_query(
     keychain: &security_framework::os::macos::keychain::SecKeychain,
-    account: Option<&str>,
+    purpose: query::Purpose<'_>,
 ) -> security_framework::item::ItemSearchOptions {
-    use security_framework::item::{ItemClass, ItemSearchOptions};
-
-    let mut query = ItemSearchOptions::new();
-    query
-        .keychains(std::slice::from_ref(keychain))
-        .class(ItemClass::generic_password())
-        .service(SERVICE_NAME)
-        .case_insensitive(Some(false));
-    if let Some(account) = account {
-        query.account(account);
-    }
-    query
+    let mut builder = security_framework::item::ItemSearchOptions::new();
+    query::configure(&mut builder, keychain, purpose);
+    builder
 }
 
 #[cfg(target_os = "macos")]
@@ -207,17 +225,6 @@ fn login_keychain() -> Result<security_framework::os::macos::keychain::SecKeycha
         }
     }
     Err(StoreError::Backend)
-}
-
-#[cfg(target_os = "macos")]
-fn write_password(
-    keychain: &security_framework::os::macos::keychain::SecKeychain,
-    account: &str,
-    secret: &Secret,
-) -> Result<(), StoreError> {
-    keychain
-        .set_generic_password(SERVICE_NAME, account, secret.expose().as_bytes())
-        .map_err(map_sec_error)
 }
 
 #[cfg(target_os = "macos")]
@@ -249,10 +256,12 @@ fn deletion_result(result: security_framework::base::Result<()>) -> Result<bool,
 #[cfg(target_os = "macos")]
 fn map_sec_error(err: security_framework::base::Error) -> StoreError {
     use security_framework_sys::base::{
-        errSecAuthFailed as ERR_SEC_AUTH_FAILED, errSecItemNotFound as ERR_SEC_ITEM_NOT_FOUND,
+        errSecAuthFailed as ERR_SEC_AUTH_FAILED, errSecDuplicateItem as ERR_SEC_DUPLICATE_ITEM,
+        errSecItemNotFound as ERR_SEC_ITEM_NOT_FOUND,
     };
 
     match err.code() {
+        ERR_SEC_DUPLICATE_ITEM => StoreError::AlreadyExists,
         ERR_SEC_ITEM_NOT_FOUND => StoreError::NotFound,
         ERR_SEC_AUTH_FAILED => StoreError::AccessDenied,
         ERR_SEC_USER_CANCELED => StoreError::OperationCanceled,
@@ -266,6 +275,42 @@ fn map_sec_error(err: security_framework::base::Error) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn attributes(account: &str) -> Option<HashMap<String, String>> {
+        Some(HashMap::from([("acct".to_owned(), account.to_owned())]))
+    }
+
+    #[test]
+    fn list_names_uses_actual_accounts_and_ignores_the_legacy_index() {
+        assert_eq!(
+            extract_names([
+                attributes("Z_KEY"),
+                attributes(INDEX_ACCOUNT),
+                attributes("A_KEY"),
+                attributes("Z_KEY"),
+            ]),
+            Ok(vec!["A_KEY".to_owned(), "Z_KEY".to_owned()]),
+        );
+    }
+
+    #[test]
+    fn empty_attributes_list_returns_no_names() {
+        assert_eq!(extract_names([]), Ok(Vec::new()));
+        assert_eq!(extract_names([attributes(INDEX_ACCOUNT)]), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn unexpected_results_and_missing_accounts_are_backend_errors() {
+        assert_eq!(extract_names([None]), Err(StoreError::Backend));
+        assert_eq!(
+            extract_names([Some(HashMap::new())]),
+            Err(StoreError::Backend)
+        );
+        assert_eq!(
+            extract_names([attributes("A_KEY"), Some(HashMap::new())]),
+            Err(StoreError::Backend),
+        );
+    }
 
     #[test]
     fn secret_debug_redacts_value() {
@@ -299,8 +344,14 @@ mod tests {
     #[test]
     fn keychain_errors_do_not_assume_the_keychain_is_locked() {
         use security_framework::base::Error;
-        use security_framework_sys::base::{errSecAuthFailed, errSecItemNotFound};
+        use security_framework_sys::base::{
+            errSecAuthFailed, errSecDuplicateItem, errSecItemNotFound,
+        };
 
+        assert_eq!(
+            map_sec_error(Error::from_code(errSecDuplicateItem)),
+            StoreError::AlreadyExists
+        );
         assert!(matches!(
             map_sec_error(Error::from_code(errSecItemNotFound)),
             StoreError::NotFound

@@ -1,5 +1,7 @@
 # kagitaba
 
+[English](README.md) | [日本語](README.ja.md)
+
 `kagitaba` is an **experimental**, local-first API key manager CLI for macOS.
 
 It stores API keys in the local macOS **Login Keychain**, then injects only selected keys into commands you explicitly launch.
@@ -17,6 +19,7 @@ It stores API keys in the local macOS **Login Keychain**, then injects only sele
   - Secure prompt (no echo) for secret input
   - No secret argument accepted on the command line
   - Confirmation before replacing existing entries
+  - A name registered concurrently during input also requires replacement confirmation
 - `kagitaba status [ENV_NAME]`
   - Shows registration status / key names only
   - Never prints secret values
@@ -98,6 +101,8 @@ The code is split so each layer can be tested independently:
 - Storage targets the local Login Keychain and a dedicated `kagitaba` service namespace.
 - `kagitaba` does not change keychain lock policy, automatic locking, or lock-on-sleep settings.
 - Expected failure cases (missing key, denied access, locked keychain, process launch failure) are returned as errors without exposing secret values.
+- Invalid command-line arguments are rejected without echoing their values. Help and version output remain available.
+- New entries are added without replacing existing items. Confirmed replacement updates an existing item only; if it disappears, the operation fails instead of recreating it.
 - Key names are queried from Keychain item attributes, without reading secret values or maintaining a separate index. The legacy index item is ignored.
 - Child commands inherit the usual parent environment, with selected keys added or replaced. Existing environment variables are not filtered.
 - Secret buffers owned by the application are zeroized on drop. Rust's process API and the operating system may retain additional copies; complete memory erasure is not guaranteed.
@@ -121,6 +126,8 @@ mise exec -- cargo test --locked --all-targets
 ```
 
 Default tests use synthetic credentials and mocks and never access the Login Keychain.
+They cover confirmation and failure paths with recording fakes, Keychain query
+construction and name extraction, and binary-level argument-error output.
 
 ## License
 
