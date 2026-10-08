@@ -243,12 +243,12 @@ mod tests {
     #[derive(Default)]
     struct MockPrompter {
         confirms: Vec<bool>,
-        secrets: Vec<String>,
+        secret_inputs: Vec<String>,
     }
 
     impl Prompter for MockPrompter {
         fn prompt_secret(&mut self, _: &str) -> Result<Secret, AppError> {
-            Ok(Secret::new(self.secrets.remove(0)))
+            Ok(Secret::new(self.secret_inputs.remove(0)))
         }
 
         fn confirm(&mut self, _: &str) -> Result<bool, AppError> {
@@ -332,7 +332,7 @@ mod tests {
             store.clone(),
             MockPrompter {
                 confirms: vec![false, true],
-                secrets: vec!["new".to_string()],
+                secret_inputs: vec!["new".to_string()],
             },
             MockRunner::default(),
         );
