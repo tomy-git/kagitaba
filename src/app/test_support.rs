@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;

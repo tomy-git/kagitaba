@@ -1,32 +1,80 @@
+# SPDX-License-Identifier: MPL-2.0
+
 name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   checks:
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check SPDX license headers
+        if: runner.os == 'Linux'
+        run: |
+          python3 -B -m unittest discover -s scripts/tests -v
+          python3 -B scripts/check_license.py
+
+      - name: Read Rust version from mise.toml
+        id: rust-version
+        shell: python3 {0}
+        run: |
+          import os
+          import re
+          import tomllib
+
+          with open("mise.toml", "rb") as config:
+              version = tomllib.load(config)["tools"]["rust"]["version"]
+          if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+              raise SystemExit("mise.toml must pin Rust to an exact release version")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"version={version}", file=output)
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
           components: rustfmt, clippy
 
+      - name: Cache Cargo dependencies and build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+
       - name: Cargo fmt
+        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
       - name: Cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Cargo test
-        run: cargo test --all-targets
+        run: cargo test --locked --all-targets

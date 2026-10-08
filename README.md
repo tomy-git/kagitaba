@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
 # kagitaba
 
 [English](README.md) | [日本語](README.ja.md)
@@ -129,6 +131,38 @@ Default tests use synthetic credentials and mocks and never access the Login Key
 They cover confirmation and failure paths with recording fakes, Keychain query
 construction and name extraction, and binary-level argument-error output.
 
+### CI
+
+GitHub Actions runs for pull requests, pushes to `main`, and manual dispatches.
+Pushing a work branch alone does not start CI. New runs cancel older runs for the
+same event and ref.
+
+CI reads the pinned Rust version from `mise.toml`. Formatting is checked once on
+Ubuntu; Clippy and tests run on both Ubuntu and macOS with `--locked`. Cargo
+dependencies and build outputs are cached separately by OS, architecture, and
+compiler, with keys based on the manifests and workflow. Clippy and tests still
+run on every invocation, including cache hits.
+
 ## License
 
-This repository keeps the existing license unchanged.
+This project is licensed under the [Mozilla Public License 2.0](LICENSE).
+
+Every repository file must start with `SPDX-License-Identifier: MPL-2.0` in its
+format's comment syntax (HTML comments for Markdown, plain text for `LICENSE`).
+Script headers follow the shebang immediately, if present. This includes
+`Cargo.lock`; restore its header if Cargo regenerates it.
+
+CI checks the headers on Ubuntu before installing Rust. The checker includes
+tracked files and new, non-ignored files; ignored build outputs and local files
+are not included. Unknown formats and symlinks fail rather than being skipped.
+Add a reviewed header format before introducing a new file type. The check also
+requires `package.license = "MPL-2.0"` and verifies the existing license body,
+allowing only whitespace changes. The license body is preserved beneath its SPDX
+metadata line.
+
+Run the same checks locally with Python 3.11 or newer:
+
+```bash
+python3 -B -m unittest discover -s scripts/tests -v
+python3 -B scripts/check_license.py
+```

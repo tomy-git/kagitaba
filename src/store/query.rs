@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 //! Shared query construction, with an adapter that can record the actual builder calls.
 
 use super::SERVICE_NAME;

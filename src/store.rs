@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 #[cfg(any(target_os = "macos", test))]
 use std::collections::{BTreeSet, HashMap};
 
