@@ -1,5 +1,7 @@
 # kagitaba
 
+[English](README.md) | [日本語](README.ja.md)
+
 `kagitaba` is an **experimental**, local-first API key manager CLI for macOS.
 
 It stores API keys in the local macOS **Login Keychain**, then injects only selected keys into commands you explicitly launch.
