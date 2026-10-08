@@ -129,6 +129,18 @@ Default tests use synthetic credentials and mocks and never access the Login Key
 They cover confirmation and failure paths with recording fakes, Keychain query
 construction and name extraction, and binary-level argument-error output.
 
+### CI
+
+GitHub Actions runs for pull requests, pushes to `main`, and manual dispatches.
+Pushing a work branch alone does not start CI. New runs cancel older runs for the
+same event and ref.
+
+CI reads the pinned Rust version from `mise.toml`. Formatting is checked once on
+Ubuntu; Clippy and tests run on both Ubuntu and macOS with `--locked`. Cargo
+dependencies and build outputs are cached separately by OS, architecture, and
+compiler, with keys based on the manifests and workflow. Clippy and tests still
+run on every invocation, including cache hits.
+
 ## License
 
 This repository keeps the existing license unchanged.
