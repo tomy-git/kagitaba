@@ -1,0 +1,6 @@
+[tools]
+rust = { version = "1.99.0", profile = "minimal", components = ["rustfmt", "clippy"] }
+
+[env]
+CARGO_HOME = "{{config_root}}/.local/cargo"
+RUSTUP_HOME = "{{config_root}}/.local/rustup"
