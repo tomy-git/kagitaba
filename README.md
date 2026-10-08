@@ -30,11 +30,25 @@ It stores API keys in the local macOS **Login Keychain**, then injects only sele
 
 ## Installation
 
+With [mise](https://mise.jdx.dev/) installed:
+
 ```bash
-cargo build --release
+mise trust mise.toml
+mise install
+mise exec -- cargo build --locked --release
 ```
 
 The binary is created at `target/release/kagitaba`.
+
+`mise.toml` pins Rust and installs Cargo, rustfmt, and Clippy. Rustup and Cargo
+store their toolchains and dependency caches in this checkout's ignored `.local/`
+directory. Shell startup files and global Rust defaults are not changed. Mise
+also keeps its own install tracking, trust records, and caches outside the checkout.
+Use `mise exec --` for development commands so the project-specific paths apply.
+An existing compatible Rust installation can also build this project directly.
+Mise's shared Rust install tracking links to this checkout. After moving the
+checkout, or when using another checkout with the same Rust version, run
+`mise install` there again. Each checkout retains its own Cargo and Rustup files.
 
 ## Usage
 
@@ -84,6 +98,9 @@ The code is split so each layer can be tested independently:
 - Storage targets the local Login Keychain and a dedicated `kagitaba` service namespace.
 - `kagitaba` does not change keychain lock policy, automatic locking, or lock-on-sleep settings.
 - Expected failure cases (missing key, denied access, locked keychain, process launch failure) are returned as errors without exposing secret values.
+- Key names are queried from Keychain item attributes, without reading secret values or maintaining a separate index. The legacy index item is ignored.
+- Child commands inherit the usual parent environment, with selected keys added or replaced. Existing environment variables are not filtered.
+- Secret buffers owned by the application are zeroized on drop. Rust's process API and the operating system may retain additional copies; complete memory erasure is not guaranteed.
 
 ### Signal handling
 
@@ -98,10 +115,12 @@ For stable behavior in managed environments, use consistent binary signing and d
 ## Development
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
+mise exec -- cargo fmt --all -- --check
+mise exec -- cargo clippy --locked --all-targets -- -D warnings
+mise exec -- cargo test --locked --all-targets
 ```
+
+Default tests use synthetic credentials and mocks and never access the Login Keychain.
 
 ## License
 

@@ -125,7 +125,7 @@ impl App {
         for key in &args.keys {
             validate_env_name(key)?;
             let secret = self.store.get(key)?;
-            envs.push((key.clone(), secret.expose().to_string()));
+            envs.push((key.clone(), secret));
         }
 
         let program = args
@@ -267,11 +267,15 @@ mod tests {
             &self,
             program: &str,
             args: &[String],
-            envs: &[(String, String)],
+            envs: &[(String, Secret)],
         ) -> Result<ExitOutcome, ProcessError> {
-            self.captured
-                .borrow_mut()
-                .push((program.to_string(), args.to_vec(), envs.to_vec()));
+            self.captured.borrow_mut().push((
+                program.to_string(),
+                args.to_vec(),
+                envs.iter()
+                    .map(|(name, secret)| (name.clone(), secret.expose().to_string()))
+                    .collect(),
+            ));
             Ok(ExitOutcome {
                 code: self.exit_code,
             })
@@ -391,6 +395,87 @@ mod tests {
         );
 
         assert!(matches!(result, Err(AppError::InvalidEnvName(_))));
+    }
+
+    #[test]
+    fn legacy_index_name_is_not_a_valid_environment_name() {
+        assert!(validate_env_name("__kagitaba_index__").is_err());
+    }
+
+    #[test]
+    fn missing_second_key_does_not_launch_child() {
+        let store = MockStore::default();
+        store
+            .set("KEY_A", &Secret::new("synthetic-value".into()))
+            .unwrap();
+        let captured = Rc::new(RefCell::new(Vec::new()));
+        let runner = MockRunner {
+            captured: captured.clone(),
+            exit_code: 0,
+        };
+        let mut app = build_app(store, MockPrompter::default(), runner);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = app.run(
+            Cli {
+                command: Command::Run(RunArgs {
+                    keys: vec!["KEY_A".into(), "MISSING_KEY".into()],
+                    command: vec!["program".into()],
+                }),
+            },
+            &mut out,
+            &mut err,
+        );
+        assert!(matches!(result, Err(AppError::Store(StoreError::NotFound))));
+        assert!(captured.borrow().is_empty());
+        assert!(out.is_empty());
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn denied_deletion_does_not_print_success() {
+        struct DeniedDeletionStore;
+        impl CredentialStore for DeniedDeletionStore {
+            fn exists(&self, _: &str) -> Result<bool, StoreError> {
+                Ok(true)
+            }
+            fn get(&self, _: &str) -> Result<Secret, StoreError> {
+                unreachable!()
+            }
+            fn set(&self, _: &str, _: &Secret) -> Result<(), StoreError> {
+                unreachable!()
+            }
+            fn delete(&self, _: &str) -> Result<bool, StoreError> {
+                Err(StoreError::AccessDenied)
+            }
+            fn list_names(&self) -> Result<Vec<String>, StoreError> {
+                unreachable!()
+            }
+        }
+        let mut app = App::new(
+            Box::new(DeniedDeletionStore),
+            Box::new(MockPrompter {
+                confirms: vec![true],
+                secret_inputs: vec![],
+            }),
+            Box::new(MockRunner::default()),
+        );
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = app.run(
+            Cli {
+                command: Command::Delete(DeleteArgs {
+                    env_name: "TEST_KEY".into(),
+                }),
+            },
+            &mut out,
+            &mut err,
+        );
+        assert!(matches!(
+            result,
+            Err(AppError::Store(StoreError::AccessDenied))
+        ));
+        assert!(out.is_empty());
     }
 
     #[test]

@@ -139,6 +139,7 @@ dependencies = [
  "clap",
  "rpassword",
  "security-framework",
+ "security-framework-sys",
  "thiserror",
  "zeroize",
 ]
