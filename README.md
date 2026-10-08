@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
 # kagitaba
 
 [English](README.md) | [日本語](README.ja.md)
@@ -143,4 +145,24 @@ run on every invocation, including cache hits.
 
 ## License
 
-This repository keeps the existing license unchanged.
+This project is licensed under the [Mozilla Public License 2.0](LICENSE).
+
+Every repository file must start with `SPDX-License-Identifier: MPL-2.0` in its
+format's comment syntax (HTML comments for Markdown, plain text for `LICENSE`).
+Script headers follow the shebang immediately, if present. This includes
+`Cargo.lock`; restore its header if Cargo regenerates it.
+
+CI checks the headers on Ubuntu before installing Rust. The checker includes
+tracked files and new, non-ignored files; ignored build outputs and local files
+are not included. Unknown formats and symlinks fail rather than being skipped.
+Add a reviewed header format before introducing a new file type. The check also
+requires `package.license = "MPL-2.0"` and verifies the existing license body,
+allowing only whitespace changes. The license body is preserved beneath its SPDX
+metadata line.
+
+Run the same checks locally with Python 3.11 or newer:
+
+```bash
+python3 -B -m unittest discover -s scripts/tests -v
+python3 -B scripts/check_license.py
+```

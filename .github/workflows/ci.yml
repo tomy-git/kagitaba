@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MPL-2.0
+
 name: CI
 
 on:
@@ -26,6 +28,12 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+
+      - name: Check SPDX license headers
+        if: runner.os == 'Linux'
+        run: |
+          python3 -B -m unittest discover -s scripts/tests -v
+          python3 -B scripts/check_license.py
 
       - name: Read Rust version from mise.toml
         id: rust-version

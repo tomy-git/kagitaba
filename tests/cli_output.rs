@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 use std::process::{Command, Output, Stdio};
 
 fn run(args: &[&str]) -> Output {

@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
 # kagitaba
 
 [English](README.md) | [日本語](README.ja.md)
@@ -131,4 +133,15 @@ CI の Rust バージョンは `mise.toml` の固定値を読み取ります。�
 
 ## ライセンス
 
-本リポジトリでは既存のライセンスがそのまま適用されます。
+本プロジェクトには [Mozilla Public License 2.0](LICENSE) を適用しています。
+
+リポジトリ内の各ファイルの先頭に、その形式のコメント構文で `SPDX-License-Identifier: MPL-2.0` を記載します。Markdown では HTML コメント、`LICENSE` ではプレーンテキストを使います。スクリプトに shebang がある場合は、その直後に記載します。`Cargo.lock` も対象なので、Cargo によって再生成された場合はヘッダーを戻してください。
+
+CI では Rust のインストール前に Ubuntu で検査します。Git 管理対象と未追跡の新規ファイルを対象とし、Git で無視されるビルド成果物やローカルファイルは含めません。未対応の形式やシンボリックリンクは、読み飛ばさずに検査を失敗させます。新しいファイル形式を導入する場合は、レビュー済みのヘッダー形式を検査処理に追加してください。`package.license = "MPL-2.0"` と既存のライセンス本文も検査し、本文は空白以外の変更を認めません。SPDX メタデータ行の後には、従来の本文をそのまま保持しています。
+
+Python 3.11 以降で、CI と同じ検査をローカルでも実行できます。
+
+```bash
+python3 -B -m unittest discover -s scripts/tests -v
+python3 -B scripts/check_license.py
+```
