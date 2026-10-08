@@ -7,7 +7,22 @@ use kagitaba::process::SystemCommandRunner;
 use kagitaba::store::default_store;
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => match error.kind() {
+            clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => {
+                error.exit();
+            }
+            _ => {
+                // Clap's detailed errors may echo a mistakenly supplied secret argument.
+                eprintln!(
+                    "error: invalid command-line arguments. Use 'kagitaba --help' for usage."
+                );
+                eprintln!("Enter secret values at the interactive prompt, never as arguments.");
+                process::exit(2);
+            }
+        },
+    };
     let store = default_store();
     let mut app = App::new(
         store,
