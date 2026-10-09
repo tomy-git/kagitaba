@@ -21,7 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Temporarily Linux-only due to macOS runner capacity (Issue #6).
+        # Keep the matrix to preserve the checks (ubuntu-latest) check name.
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout

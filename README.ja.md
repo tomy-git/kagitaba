@@ -129,7 +129,11 @@ mise exec -- cargo test --locked --all-targets
 
 GitHub Actions は、PR、`main` への push、手動実行で動作します。作業ブランチへの push だけでは CI を開始しません。同じイベントと ref に対する新しい実行が始まると、古い実行をキャンセルします。
 
-CI の Rust バージョンは `mise.toml` の固定値を読み取ります。フォーマットの確認は Ubuntu で一度だけ行い、Clippy とテストは Ubuntu・macOS の両方で `--locked` を付けて実行します。Cargo の依存関係とビルド成果物は OS・アーキテクチャ・コンパイラごとに分け、マニフェストとワークフローに基づくキーでキャッシュします。キャッシュに一致した場合も、Clippy とテストは毎回実行します。
+GitHub-hosted macOS ランナーの割り当て不足のため、CI は当面 Ubuntu のみで実行します（[Issue #6](https://github.com/tomy-git/kagitaba/issues/6)）。SPDX ライセンス検査とその Python テスト、`mise.toml` の固定 Rust バージョンの読み取り、フォーマット確認を維持し、Clippy と Rust テストは `--locked` を付けて実行します。Cargo の依存関係とビルド成果物は OS・アーキテクチャ・コンパイラごとに分け、マニフェストとワークフローに基づくキーでキャッシュします。キャッシュに一致した場合も、Clippy とテストは毎回実行します。
+
+Linux CI では、macOS ネイティブの Keychain アダプターや macOS 限定テストを検証できません。macOS 固有の変更は、ローカルの Mac で上記の開発用コマンドを実行し、Clippy とテストの結果を記録してください。通常のテストはモックと擬似的な認証情報を使用し、実際のログインキーチェーンにはアクセスしません。Keychain 統合試験の拡充は [Issue #4](https://github.com/tomy-git/kagitaba/issues/4) で管理します。
+
+GitHub-hosted macOS ランナーの割り当てが安定した時点、または適切な代替ランナーを確保した時点で、macOS CI の復帰を検討します。この暫定対応では self-hosted runner を導入しません。
 
 ## ライセンス
 

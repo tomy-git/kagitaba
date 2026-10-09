@@ -137,11 +137,24 @@ GitHub Actions runs for pull requests, pushes to `main`, and manual dispatches.
 Pushing a work branch alone does not start CI. New runs cancel older runs for the
 same event and ref.
 
-CI reads the pinned Rust version from `mise.toml`. Formatting is checked once on
-Ubuntu; Clippy and tests run on both Ubuntu and macOS with `--locked`. Cargo
+CI temporarily runs only on Ubuntu because GitHub-hosted macOS runners have
+insufficient capacity (see [Issue #6](https://github.com/tomy-git/kagitaba/issues/6)).
+It retains the SPDX license check and its Python tests, reads the pinned Rust
+version from `mise.toml`, checks formatting, and runs Clippy and Rust tests with
+`--locked`. Cargo
 dependencies and build outputs are cached separately by OS, architecture, and
 compiler, with keys based on the manifests and workflow. Clippy and tests still
 run on every invocation, including cache hits.
+
+Linux CI cannot check the native macOS Keychain adapter or macOS-only tests.
+For macOS-specific changes, run the development commands above on a local Mac
+and record the Clippy and test results. The normal tests use mocks and dummy
+credentials; they do not access the real Login Keychain. Keychain integration
+test improvements are tracked in [Issue #4](https://github.com/tomy-git/kagitaba/issues/4).
+
+Reconsider macOS CI when GitHub-hosted runner allocation becomes stable or a
+suitable alternative runner is available. This temporary change does not
+introduce a self-hosted runner.
 
 ## License
 
