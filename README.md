@@ -131,6 +131,19 @@ Default tests use synthetic credentials and mocks and never access the Login Key
 They cover confirmation and failure paths with recording fakes, Keychain query
 construction and name extraction, and binary-level argument-error output.
 
+On macOS, an ignored integration test creates a disposable Keychain in a private
+temporary directory, exercises the native adapter, and deletes it on success or
+assertion failure. It uses only synthetic values and an explicitly selected
+Keychain; it does not open the Login Keychain. Run it explicitly:
+
+```bash
+mise exec -- cargo test --locked --lib store::keychain::integration::isolated_keychain_round_trip -- --ignored --exact --test-threads=1
+```
+
+See [testing and coverage](docs/testing.md) for measurement commands, results,
+and the remaining untested paths. Native access-denial and cancellation behavior
+is covered by OS-boundary fakes, not by changing the real Login Keychain.
+
 ### CI
 
 GitHub Actions runs for pull requests, pushes to `main`, and manual dispatches.

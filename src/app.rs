@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 
 use thiserror::Error;
 
@@ -23,16 +23,23 @@ impl Prompter for StdioPrompter {
     }
 
     fn confirm(&mut self, prompt: &str) -> Result<bool, AppError> {
-        print!("{prompt}");
-        io::stdout().flush().map_err(AppError::Io)?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).map_err(AppError::Io)?;
-        Ok(matches!(
-            input.trim().to_ascii_lowercase().as_str(),
-            "y" | "yes"
-        ))
+        confirm_with_io(prompt, &mut io::stdin().lock(), &mut io::stdout().lock())
     }
+}
+
+fn confirm_with_io(
+    prompt: &str,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<bool, AppError> {
+    output.write_all(prompt.as_bytes())?;
+    output.flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 pub struct App {

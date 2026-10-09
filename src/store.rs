@@ -4,18 +4,12 @@
 use std::collections::{BTreeSet, HashMap};
 
 #[cfg(any(target_os = "macos", test))]
+mod keychain;
+#[cfg(any(target_os = "macos", test))]
 mod query;
 
 use thiserror::Error;
 use zeroize::Zeroizing;
-
-// SecBase.h constants not exposed by security-framework-sys 2.17.
-#[cfg(target_os = "macos")]
-const ERR_SEC_USER_CANCELED: i32 = -128;
-#[cfg(target_os = "macos")]
-const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
-#[cfg(target_os = "macos")]
-const ERR_SEC_INTERACTION_REQUIRED: i32 = -25315;
 
 #[cfg(any(target_os = "macos", test))]
 const SERVICE_NAME: &str = "dev.kagitaba.kagitaba";
@@ -69,7 +63,7 @@ pub enum StoreError {
 
 #[cfg(target_os = "macos")]
 pub fn default_store() -> Box<dyn CredentialStore> {
-    Box::new(MacosKeychainStore::new())
+    Box::new(keychain::KeychainStore::new(keychain::NativeApi))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -108,83 +102,6 @@ impl CredentialStore for UnsupportedStore {
     }
 }
 
-#[cfg(target_os = "macos")]
-#[derive(Debug)]
-struct MacosKeychainStore;
-
-#[cfg(target_os = "macos")]
-impl MacosKeychainStore {
-    fn new() -> Self {
-        Self
-    }
-
-    fn with_keychain<F, T>(&self, op: F) -> Result<T, StoreError>
-    where
-        F: FnOnce(&security_framework::os::macos::keychain::SecKeychain) -> Result<T, StoreError>,
-    {
-        let keychain = login_keychain()?;
-        op(&keychain)
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl CredentialStore for MacosKeychainStore {
-    fn exists(&self, env_name: &str) -> Result<bool, StoreError> {
-        self.with_keychain(|keychain| {
-            let query = password_query(keychain, query::Purpose::Exists(env_name));
-            match query.search() {
-                Ok(_) => Ok(true),
-                Err(err) => match map_sec_error(err) {
-                    StoreError::NotFound => Ok(false),
-                    err => Err(err),
-                },
-            }
-        })
-    }
-
-    fn get(&self, env_name: &str) -> Result<Secret, StoreError> {
-        self.with_keychain(|keychain| read_password(keychain, env_name))
-    }
-
-    fn create(&self, env_name: &str, secret: &Secret) -> Result<(), StoreError> {
-        self.with_keychain(|keychain| {
-            keychain
-                .add_generic_password(SERVICE_NAME, env_name, secret.expose().as_bytes())
-                .map_err(map_sec_error)
-        })
-    }
-
-    fn replace(&self, env_name: &str, secret: &Secret) -> Result<(), StoreError> {
-        self.with_keychain(|keychain| {
-            let (_, mut item) = keychain
-                .find_generic_password(SERVICE_NAME, env_name)
-                .map_err(map_sec_error)?;
-            item.set_password(secret.expose().as_bytes())
-                .map_err(map_sec_error)
-        })
-    }
-
-    fn delete(&self, env_name: &str) -> Result<bool, StoreError> {
-        self.with_keychain(|keychain| {
-            deletion_result(password_query(keychain, query::Purpose::Delete(env_name)).delete())
-        })
-    }
-
-    fn list_names(&self) -> Result<Vec<String>, StoreError> {
-        self.with_keychain(|keychain| {
-            let query = password_query(keychain, query::Purpose::List);
-            let items = match query.search() {
-                Ok(items) => items,
-                Err(err) => match map_sec_error(err) {
-                    StoreError::NotFound => return Ok(Vec::new()),
-                    err => return Err(err),
-                },
-            };
-            extract_names(items.into_iter().map(|item| item.simplify_dict()))
-        })
-    }
-}
-
 #[cfg(any(target_os = "macos", test))]
 fn extract_names(
     items: impl IntoIterator<Item = Option<HashMap<String, String>>>,
@@ -199,79 +116,6 @@ fn extract_names(
         }
     }
     Ok(names.into_iter().collect())
-}
-
-#[cfg(target_os = "macos")]
-fn password_query(
-    keychain: &security_framework::os::macos::keychain::SecKeychain,
-    purpose: query::Purpose<'_>,
-) -> security_framework::item::ItemSearchOptions {
-    let mut builder = security_framework::item::ItemSearchOptions::new();
-    query::configure(&mut builder, keychain, purpose);
-    builder
-}
-
-#[cfg(target_os = "macos")]
-fn login_keychain() -> Result<security_framework::os::macos::keychain::SecKeychain, StoreError> {
-    use std::path::PathBuf;
-
-    let home = std::env::var("HOME").map_err(|_| StoreError::Backend)?;
-    for name in ["login.keychain-db", "login.keychain"] {
-        let mut path = PathBuf::from(&home);
-        path.push("Library");
-        path.push("Keychains");
-        path.push(name);
-        if path.exists() {
-            return security_framework::os::macos::keychain::SecKeychain::open(path)
-                .map_err(map_sec_error);
-        }
-    }
-    Err(StoreError::Backend)
-}
-
-#[cfg(target_os = "macos")]
-fn read_password(
-    keychain: &security_framework::os::macos::keychain::SecKeychain,
-    account: &str,
-) -> Result<Secret, StoreError> {
-    use security_framework::os::macos::passwords::find_generic_password;
-
-    let keychains = std::slice::from_ref(keychain);
-    let (password, _) =
-        find_generic_password(Some(keychains), SERVICE_NAME, account).map_err(map_sec_error)?;
-    String::from_utf8(password.to_vec())
-        .map(Secret::new)
-        .map_err(|_| StoreError::Backend)
-}
-
-#[cfg(target_os = "macos")]
-fn deletion_result(result: security_framework::base::Result<()>) -> Result<bool, StoreError> {
-    match result {
-        Ok(()) => Ok(true),
-        Err(err) => match map_sec_error(err) {
-            StoreError::NotFound => Ok(false),
-            err => Err(err),
-        },
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn map_sec_error(err: security_framework::base::Error) -> StoreError {
-    use security_framework_sys::base::{
-        errSecAuthFailed as ERR_SEC_AUTH_FAILED, errSecDuplicateItem as ERR_SEC_DUPLICATE_ITEM,
-        errSecItemNotFound as ERR_SEC_ITEM_NOT_FOUND,
-    };
-
-    match err.code() {
-        ERR_SEC_DUPLICATE_ITEM => StoreError::AlreadyExists,
-        ERR_SEC_ITEM_NOT_FOUND => StoreError::NotFound,
-        ERR_SEC_AUTH_FAILED => StoreError::AccessDenied,
-        ERR_SEC_USER_CANCELED => StoreError::OperationCanceled,
-        ERR_SEC_INTERACTION_NOT_ALLOWED | ERR_SEC_INTERACTION_REQUIRED => {
-            StoreError::InteractionUnavailable
-        }
-        _ => StoreError::Backend,
-    }
 }
 
 #[cfg(test)]
@@ -319,66 +163,5 @@ mod tests {
         let secret = Secret::new("private-value".to_owned());
         assert_eq!(format!("{secret:?}"), "Secret([REDACTED])");
         assert_eq!(secret.expose(), "private-value");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn failed_deletion_is_never_reported_as_success() {
-        use security_framework::base::Error;
-        use security_framework_sys::base::{errSecAuthFailed, errSecItemNotFound};
-
-        assert!(matches!(deletion_result(Ok(())), Ok(true)));
-        assert!(matches!(
-            deletion_result(Err(Error::from_code(errSecItemNotFound))),
-            Ok(false)
-        ));
-        assert!(matches!(
-            deletion_result(Err(Error::from_code(errSecAuthFailed))),
-            Err(StoreError::AccessDenied)
-        ));
-        assert!(matches!(
-            deletion_result(Err(Error::from_code(-1))),
-            Err(StoreError::Backend)
-        ));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn keychain_errors_do_not_assume_the_keychain_is_locked() {
-        use security_framework::base::Error;
-        use security_framework_sys::base::{
-            errSecAuthFailed, errSecDuplicateItem, errSecItemNotFound,
-        };
-
-        assert_eq!(
-            map_sec_error(Error::from_code(errSecDuplicateItem)),
-            StoreError::AlreadyExists
-        );
-        assert!(matches!(
-            map_sec_error(Error::from_code(errSecItemNotFound)),
-            StoreError::NotFound
-        ));
-        assert!(matches!(
-            map_sec_error(Error::from_code(errSecAuthFailed)),
-            StoreError::AccessDenied
-        ));
-        assert!(matches!(
-            map_sec_error(Error::from_code(ERR_SEC_USER_CANCELED)),
-            StoreError::OperationCanceled
-        ));
-        for code in [
-            ERR_SEC_INTERACTION_NOT_ALLOWED,
-            ERR_SEC_INTERACTION_REQUIRED,
-        ] {
-            assert!(matches!(
-                map_sec_error(Error::from_code(code)),
-                StoreError::InteractionUnavailable
-            ));
-        }
-        // -25244 is errSecInvalidOwnerEdit, not an authentication failure.
-        assert!(matches!(
-            map_sec_error(Error::from_code(-25244)),
-            StoreError::Backend
-        ));
     }
 }

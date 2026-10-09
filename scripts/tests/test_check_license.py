@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: MPL-2.0
 import importlib.util
+import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "check_license.py"
 SPEC = importlib.util.spec_from_file_location("check_license", SCRIPT)
@@ -31,6 +35,23 @@ class LicenseChecks(unittest.TestCase):
 
     def errors(self):
         return checker.check_repository(self.root)[1]
+
+    def cli_root(self):
+        """Build a temporary repository with a runnable copy of the CLI."""
+        scripts = self.root / "scripts"
+        scripts.mkdir(exist_ok=True)
+        cli = scripts / "check_license.py"
+        shutil.copy2(SCRIPT, cli)
+        return cli
+
+    def run_cli(self, cli, *, env=None):
+        return subprocess.run(
+            [sys.executable, "-B", str(cli)],
+            text=True,
+            capture_output=True,
+            env=env,
+            check=False,
+        )
 
     def test_all_supported_formats_and_shebangs_pass(self):
         fixtures = {
@@ -143,6 +164,78 @@ class LicenseChecks(unittest.TestCase):
         self.assertTrue(any("verified copy" in error for error in self.errors()))
         self.write("LICENSE", LICENSE_TEXT.replace("\n\n", "\n\n\n"))
         self.assertEqual(self.errors(), [])
+
+    def test_main_cli_success_reports_stdout_and_exit_code(self):
+        cli = self.cli_root()
+
+        result = self.run_cli(cli)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            result.stdout,
+            "PASS: 3 files have MPL-2.0 SPDX headers; Cargo metadata and LICENSE agree\n",
+        )
+
+    def test_main_cli_check_failure_reports_stderr_and_exit_code(self):
+        cli = self.cli_root()
+        self.write("broken.rs", "fn main() {}\n")
+
+        result = self.run_cli(cli)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("ERROR: 'broken.rs':", result.stderr)
+        self.assertIn("first line must be", result.stderr)
+
+    def test_main_cli_git_enumeration_failure_reports_stderr_and_exit_code(self):
+        cli = self.cli_root()
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        fake_git = fake_bin / "git"
+        fake_git.write_text("#!/bin/sh\nexit 23\n", encoding="utf-8")
+        fake_git.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = str(fake_bin)
+
+        result = self.run_cli(cli, env=env)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "ERROR: cannot enumerate repository files with git\n")
+
+    def test_missing_cargo_manifest_and_license_are_reported(self):
+        manifest = self.root / "Cargo.toml"
+        license_file = self.root / "LICENSE"
+        manifest.unlink()
+        license_file.unlink()
+
+        self.assertEqual(
+            checker.check_metadata(self.root),
+            [
+                "Cargo.toml: a regular manifest file is required",
+                "LICENSE: a regular license file is required",
+            ],
+        )
+
+    def test_license_decode_failure_is_reported(self):
+        (self.root / "LICENSE").write_bytes(b"SPDX-License-Identifier: MPL-2.0\n\xff\n")
+
+        self.assertEqual(checker.check_metadata(self.root), ["LICENSE: cannot read license text"])
+
+    def test_license_read_failure_is_reported_without_filesystem_permissions(self):
+        license_file = self.root / "LICENSE"
+        original_read_text = Path.read_text
+
+        def fail_for_license(path, *args, **kwargs):
+            if path == license_file:
+                raise PermissionError("simulated unreadable license")
+            return original_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", fail_for_license):
+            errors = checker.check_metadata(self.root)
+
+        self.assertEqual(errors, ["LICENSE: cannot read license text"])
 
 
 if __name__ == "__main__":

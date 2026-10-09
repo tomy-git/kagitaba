@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[tool.coverage.run]
+branch = true
+patch = ["subprocess"]
+include = ["*/scripts/check_license.py"]
+data_file = ".local/python-coverage/.coverage"
+
+[tool.coverage.paths]
+checker = ["scripts", "*/kagitaba-license-test-*/scripts"]
