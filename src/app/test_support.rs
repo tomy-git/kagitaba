@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use super::{App, AppError, Prompter};
 use crate::cli::{Cli, Command};
+use crate::history::{Entry, History, HistoryError, Query, Record, Settings, SettingsUpdate};
 use crate::process::{CommandRunner, ExitOutcome, ProcessError};
 use crate::store::{CredentialStore, Secret, StoreError};
 
@@ -138,6 +139,9 @@ pub struct RunnerState {
     pub calls: Vec<RunCapture>,
     pub exit_code: i32,
     pub failure: Option<io::ErrorKind>,
+    pub wait_failure: bool,
+    pub signal: Option<i32>,
+    pub unknown: bool,
 }
 
 #[derive(Clone, Default)]
@@ -149,6 +153,7 @@ impl CommandRunner for FakeRunner {
         program: &str,
         args: &[String],
         envs: &[(String, Secret)],
+        on_started: &mut dyn FnMut(),
     ) -> Result<ExitOutcome, ProcessError> {
         let mut state = self.0.borrow_mut();
         state.calls.push((
@@ -158,12 +163,84 @@ impl CommandRunner for FakeRunner {
                 .map(|(name, secret)| (name.clone(), secret.expose().into()))
                 .collect(),
         ));
-        match state.failure {
-            Some(kind) => Err(ProcessError::Launch(io::Error::from(kind))),
-            None => Ok(ExitOutcome {
-                code: state.exit_code,
-            }),
+        if let Some(kind) = state.failure {
+            return Err(ProcessError::Launch(io::Error::new(
+                kind,
+                "private-backend-error",
+            )));
         }
+        on_started();
+        if state.wait_failure {
+            return Err(ProcessError::Wait(io::Error::other(
+                "private-backend-error",
+            )));
+        }
+        Ok(if state.unknown {
+            ExitOutcome::Unknown
+        } else if let Some(signal) = state.signal {
+            ExitOutcome::Signaled(signal)
+        } else {
+            ExitOutcome::Exited(state.exit_code)
+        })
+    }
+}
+
+#[derive(Default)]
+pub struct HistoryState {
+    pub records: Vec<Record>,
+    pub calls: Vec<&'static str>,
+    pub failure: Option<HistoryError>,
+    pub settings: Settings,
+    pub entries: Vec<Entry>,
+    pub query: Option<Query>,
+}
+
+#[derive(Clone, Default)]
+pub struct FakeHistory(pub Rc<RefCell<HistoryState>>);
+
+impl FakeHistory {
+    fn call(&self, name: &'static str) -> Result<(), HistoryError> {
+        let mut state = self.0.borrow_mut();
+        state.calls.push(name);
+        state.failure.map_or(Ok(()), Err)
+    }
+}
+
+impl History for FakeHistory {
+    fn record(&self, record: &Record) -> Result<(), HistoryError> {
+        self.call("record")?;
+        self.0.borrow_mut().records.push(record.clone());
+        Ok(())
+    }
+    fn settings(&self) -> Result<Settings, HistoryError> {
+        self.call("settings")?;
+        Ok(self.0.borrow().settings)
+    }
+    fn configure(&self, update: SettingsUpdate) -> Result<Settings, HistoryError> {
+        self.call("configure")?;
+        let mut state = self.0.borrow_mut();
+        if let Some(enabled) = update.enabled {
+            state.settings.enabled = enabled;
+        }
+        if let Some(days) = update.retention_days {
+            state.settings.retention_days = days;
+        }
+        if let Some(events) = update.max_events {
+            state.settings.max_events = events;
+        }
+        Ok(state.settings)
+    }
+    fn list(&self, query: &Query) -> Result<Vec<Entry>, HistoryError> {
+        self.call("list")?;
+        let mut state = self.0.borrow_mut();
+        state.query = Some(query.clone());
+        Ok(state.entries.clone())
+    }
+    fn clear(&self) -> Result<(), HistoryError> {
+        self.call("clear")
+    }
+    fn reclaim(&self) -> Result<(), HistoryError> {
+        self.call("reclaim")
     }
 }
 
@@ -171,9 +248,10 @@ pub struct Fixture {
     pub store: FakeStore,
     pub prompt: FakePrompter,
     pub runner: FakeRunner,
+    pub history: FakeHistory,
     pub out: Vec<u8>,
     pub err: Vec<u8>,
-    app: App,
+    pub app: App,
 }
 
 impl Default for Fixture {
@@ -181,15 +259,18 @@ impl Default for Fixture {
         let store = FakeStore::default();
         let prompt = FakePrompter::default();
         let runner = FakeRunner::default();
+        let history = FakeHistory::default();
         let app = App::new(
             Box::new(store.clone()),
             Box::new(prompt.clone()),
             Box::new(runner.clone()),
-        );
+        )
+        .with_history(Box::new(history.clone()));
         Self {
             store,
             prompt,
             runner,
+            history,
             out: Vec::new(),
             err: Vec::new(),
             app,

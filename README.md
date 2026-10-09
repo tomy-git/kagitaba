@@ -87,6 +87,74 @@ Delete a key:
 kagitaba delete OPENAI_API_KEY
 ```
 
+## Operation history
+
+File history is disabled by default. Enable it explicitly; inspect or change its
+retention settings without accessing Keychain:
+
+```bash
+kagitaba history enable
+kagitaba history config
+kagitaba history config --retention-days 30 --max-events 10000
+kagitaba history --key OPENAI_API_KEY --failed --limit 20
+kagitaba history disable
+kagitaba history clear
+kagitaba history reclaim
+```
+
+`history` lists the newest operations first (default 50, range 1–1000).
+`--key` and `--failed` can be combined. Failures include failed mutations,
+pre-launch failures, nonzero child exits and signals; user aborts and unknown
+results are not inferred to be failures. Displayed timestamps use UTC (`Z`).
+
+History records create, replace and delete outcomes, validated key names, fixed
+error classes, and correlated run start/end events. It stores only the program
+basename, never its full path, arguments, environment values, secret input,
+child output or raw error text. `status` does not access history. Key names over
+256 bytes and program names over 256 bytes after control-character escaping are
+omitted from history; the original key operation or command still runs.
+
+A run start is recorded only after successful process creation with the selected
+keys. It does not prove an API call, authentication or actual key use. A start
+without an end displays `unknown`; an end without a stored start displays
+`end-only`. Exit codes and signals are distinct, including exit 143 versus signal
+15. Wait failures display unknown termination. These are local best-effort
+records: crashes and storage failures can leave gaps, and the same user can
+modify or delete them. They are not a tamper-resistant audit trail.
+
+Files are stored in `$HOME/Library/Application Support/kagitaba/` on macOS
+(and `$HOME/.local/state/kagitaba/` on Linux test builds). The directory is owned
+by the current user with mode 0700; the DB, configuration, lock, temporary files
+and SQLite sidecars use mode 0600. Unsafe ownership, permissions, symlinks,
+hardlinks and nonregular files are rejected without repair. History metadata
+still reveals key names, program names and usage times. Protect backups with
+the same permissions; no automatic backup or external logging is performed.
+
+The defaults are 90 days and 10,000 **event rows** (a complete run normally uses
+two). Settings allow 1–3650 days and 2–1,000,000 event rows. Pruning runs during
+recording and listing, removes entire operation groups, and uses each group's
+newest event for age. Reduced settings take effect on the next record or list;
+there is no background cleanup while idle. Disabling recording retains existing
+history and still permits listing, clearing and reclaiming space.
+
+`history clear` requires `y` or `yes`, deletes only history, then runs SQLite
+`VACUUM`. Configuration and Keychain entries remain. If reclamation fails after
+logical deletion, the error explicitly says history was cleared; retry
+`history reclaim`. Retention pruning is logical deletion; `reclaim` can release
+unused database pages and may need roughly twice the DB size in free space.
+Neither command guarantees erasure from backups, filesystem snapshots or storage
+media. See [history storage details](docs/history.md) for schema and recovery.
+
+Recording failures produce only `warning: operation history could not be
+recorded.` on stderr. A successful key operation still prints its normal success
+message, and history failures never replace a child exit status or roll back
+Keychain changes. Lock contention has bounded waits. Disk-full, permission,
+initialization and corruption errors preserve the original operation result;
+a corrupt or unsupported DB is never automatically deleted or overwritten.
+History-management commands report a fixed error on failure. `history disable`
+can turn recording off even when the DB is corrupt, provided its file metadata
+and configuration are safe. Interrupted runs may remain unknown.
+
 ## Architecture
 
 The code is split so each layer can be tested independently:
@@ -97,6 +165,7 @@ The code is split so each layer can be tested independently:
   - non-macOS builds use a non-functional placeholder backend so tests can run with mocks
 - `src/process.rs`: child-process execution (program + args + scoped env injection)
 - `src/app.rs`: command orchestration, prompts, validation, and user-facing behavior
+- `src/history/`: typed events, private SQLite storage, configuration and queries
 
 ## Keychain and platform behavior
 
