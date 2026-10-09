@@ -5,6 +5,7 @@ use std::process;
 use clap::Parser;
 use kagitaba::app::{App, AppError, StdioPrompter};
 use kagitaba::cli::Cli;
+use kagitaba::history::HistoryStore;
 use kagitaba::process::SystemCommandRunner;
 use kagitaba::store::default_store;
 
@@ -30,7 +31,8 @@ fn main() {
         store,
         Box::new(StdioPrompter),
         Box::new(SystemCommandRunner),
-    );
+    )
+    .with_history(Box::new(HistoryStore::from_home()));
 
     match app.run(cli, &mut std::io::stdout(), &mut std::io::stderr()) {
         Ok(code) => process::exit(code),

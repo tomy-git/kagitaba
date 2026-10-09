@@ -500,3 +500,6 @@ fn stdio_confirmation_propagates_read_write_and_flush_errors() {
         assert_eq!(input.position(), 0);
     }
 }
+
+#[path = "history_tests.rs"]
+mod history_tests;

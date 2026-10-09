@@ -6,8 +6,15 @@ use std::io::{self, BufRead, Write};
 
 use thiserror::Error;
 
-use crate::cli::{Cli, Command, DeleteArgs, RunArgs, SetArgs, StatusArgs};
-use crate::process::{CommandRunner, ProcessError};
+use crate::cli::{
+    Cli, Command, DeleteArgs, HistoryArgs, HistoryCommand, RunArgs, SetArgs, StatusArgs,
+};
+use crate::history::{
+    DisabledHistory, Entry, EntryKind, ErrorClass, Event, History, HistoryError, KeyName,
+    MutationOperation, OperationId, Outcome, ProgramName, Query, Record, RunResult, Settings,
+    SettingsUpdate, Termination,
+};
+use crate::process::{CommandRunner, ExitOutcome, ProcessError};
 use crate::store::{CredentialStore, Secret, StoreError};
 
 pub trait Prompter {
@@ -49,6 +56,7 @@ pub struct App {
     store: Box<dyn CredentialStore>,
     prompter: Box<dyn Prompter>,
     runner: Box<dyn CommandRunner>,
+    history: Box<dyn History>,
 }
 
 impl App {
@@ -61,7 +69,14 @@ impl App {
             store,
             prompter,
             runner,
+            history: Box::new(DisabledHistory),
         }
+    }
+
+    /// 履歴はストアと独立して注入し、status では一切アクセスしない。
+    pub fn with_history(mut self, history: Box<dyn History>) -> Self {
+        self.history = history;
+        self
     }
 
     pub fn run(
@@ -72,7 +87,7 @@ impl App {
     ) -> Result<i32, AppError> {
         match cli.command {
             Command::Set(args) => {
-                self.handle_set(args, out)?;
+                self.handle_set(args, out, err)?;
                 Ok(0)
             }
             Command::Status(args) => {
@@ -81,56 +96,80 @@ impl App {
             }
             Command::Run(args) => self.handle_run(args, err),
             Command::Delete(args) => {
-                self.handle_delete(args, out)?;
+                self.handle_delete(args, out, err)?;
+                Ok(0)
+            }
+            Command::History(args) => {
+                self.handle_history(args, out)?;
                 Ok(0)
             }
         }
     }
 
-    fn handle_set(&mut self, args: SetArgs, out: &mut dyn Write) -> Result<(), AppError> {
-        // キー名を先に検証し、不正な入力では確認・秘密値の入力・ストアへのアクセスを行わない。
-        validate_env_name(&args.env_name)?;
-
-        // 既存項目への上書きが拒否されたら、秘密値を入力させず書き込みも行わない。
-        let replace_existing = self.store.exists(&args.env_name)?;
-        if replace_existing && !self.confirm_replacement(&args.env_name, out)? {
-            return Ok(());
-        }
-
-        let secret = self
-            .prompter
-            .prompt_secret(&format!("Enter secret for {}: ", args.env_name))?;
-        if replace_existing {
-            // 確認後に対象が消えていても、ストアは新規作成せず更新失敗を返す。
-            self.store.replace(&args.env_name, &secret)?;
-        } else {
-            match self.store.create(&args.env_name, &secret) {
-                Ok(()) => {}
-                Err(StoreError::AlreadyExists) => {
-                    // 入力中の同名登録競合でも、上書き確認を省略せず相手の値を保護する。
-                    if !self.confirm_replacement(&args.env_name, out)? {
-                        return Ok(());
-                    }
-                    self.store.replace(&args.env_name, &secret)?;
-                }
-                Err(error) => return Err(error.into()),
+    fn handle_set(
+        &mut self,
+        args: SetArgs,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+    ) -> Result<(), AppError> {
+        let id = history_id(err);
+        let mut operation = MutationOperation::Set;
+        let mut key = None;
+        // この結果に表示 I/O を含めない。保存 API 成功後の表示失敗でも履歴は成功を保つ。
+        let result = (|| -> Result<bool, AppError> {
+            validate_env_name(&args.env_name)?;
+            key = KeyName::new(&args.env_name);
+            let exists = self.store.exists(&args.env_name)?;
+            operation = if exists {
+                MutationOperation::Replace
+            } else {
+                MutationOperation::Create
+            };
+            if exists && !self.confirm_replacement(&args.env_name)? {
+                return Ok(false);
             }
+            let secret = self
+                .prompter
+                .prompt_secret(&format!("Enter secret for {}: ", args.env_name))?;
+            if exists {
+                self.store.replace(&args.env_name, &secret)?;
+            } else {
+                match self.store.create(&args.env_name, &secret) {
+                    Ok(()) => {}
+                    Err(StoreError::AlreadyExists) => {
+                        operation = MutationOperation::Replace;
+                        if !self.confirm_replacement(&args.env_name)? {
+                            return Ok(false);
+                        }
+                        self.store.replace(&args.env_name, &secret)?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Ok(true)
+        })();
+        record_history(
+            self.history.as_ref(),
+            id.as_ref(),
+            Event::Mutation {
+                operation,
+                key,
+                outcome: mutation_outcome(&result),
+            },
+            err,
+        );
+        if result? {
+            // Stored は保存 API の成功を示す。API キー自体の有効性を保証するものではない。
+            writeln!(out, "Stored '{}'.", args.env_name)?;
+        } else {
+            writeln!(out, "Aborted.")?;
         }
-        // 入力・確認・保存の失敗はここまで到達しない。「Stored」は保存 API の成功を示し、
-        // API 提供元でのキーの有効性確認や、保存後の読み戻し照合は行っていない。
-        writeln!(out, "Stored '{}'.", args.env_name).map_err(AppError::Io)?;
         Ok(())
     }
 
-    fn confirm_replacement(&mut self, name: &str, out: &mut dyn Write) -> Result<bool, AppError> {
-        // 明示的な肯定だけを上書き許可とし、確認の I/O 失敗も保存へ進めない。
+    fn confirm_replacement(&mut self, name: &str) -> Result<bool, AppError> {
         let question = format!("Entry '{name}' already exists. Replace it? [y/N]: ");
-        if self.prompter.confirm(&question)? {
-            Ok(true)
-        } else {
-            writeln!(out, "Aborted.").map_err(AppError::Io)?;
-            Ok(false)
-        }
+        self.prompter.confirm(&question)
     }
 
     fn handle_status(&self, args: StatusArgs, out: &mut dyn Write) -> Result<(), AppError> {
@@ -157,51 +196,357 @@ impl App {
     }
 
     fn handle_run(&self, args: RunArgs, err: &mut dyn Write) -> Result<i32, AppError> {
-        for key in &args.keys {
-            validate_env_name(key)?;
-        }
-        let program = args
+        let id = history_id(err);
+        let keys: Vec<KeyName> = args
+            .keys
+            .iter()
+            .filter_map(|key| KeyName::new(key))
+            .collect();
+        let program_name = args
             .command
             .first()
-            .ok_or_else(|| AppError::InvalidCommand("missing program".to_string()))?;
-        let mut envs = Vec::with_capacity(args.keys.len());
-        for key in &args.keys {
-            let secret = self.store.get(key)?;
-            envs.push((key.clone(), secret));
-        }
-
-        let program_args = args.command[1..].to_vec();
-
-        let outcome = self
+            .and_then(|program| ProgramName::from_path(program));
+        let prepare = (|| -> Result<_, AppError> {
+            for key in &args.keys {
+                validate_env_name(key)?;
+            }
+            let program = args
+                .command
+                .first()
+                .ok_or_else(|| AppError::InvalidCommand("missing program".to_string()))?;
+            let mut envs = Vec::with_capacity(args.keys.len());
+            for key in &args.keys {
+                envs.push((key.clone(), self.store.get(key)?));
+            }
+            Ok((program, envs))
+        })();
+        let (program, envs) = match prepare {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                record_history(
+                    self.history.as_ref(),
+                    id.as_ref(),
+                    Event::RunFailure {
+                        keys,
+                        program: program_name,
+                        error: error_class(&error),
+                    },
+                    err,
+                );
+                return Err(error);
+            }
+        };
+        // callback は spawn 成功時だけ呼ばれる。秘密値、引数、環境変数は capture しない。
+        let history = self.history.as_ref();
+        let mut on_started = || {
+            record_history(
+                history,
+                id.as_ref(),
+                Event::RunStart {
+                    keys: keys.clone(),
+                    program: program_name.clone(),
+                },
+                err,
+            )
+        };
+        let result = self
             .runner
-            .run(program, &program_args, &envs)
-            .map_err(|e| match e {
-                ProcessError::Launch(inner) => {
-                    let _ = writeln!(err, "failed to launch '{program}': {inner}");
-                    AppError::Process(ProcessError::Launch(inner))
-                }
-            })?;
-
-        Ok(outcome.code)
+            .run(program, &args.command[1..], &envs, &mut on_started);
+        match result {
+            Ok(outcome) => {
+                let termination = match outcome {
+                    ExitOutcome::Exited(code) => Termination::Exited(code),
+                    ExitOutcome::Signaled(signal) => Termination::Signaled(signal),
+                    ExitOutcome::Unknown => Termination::Unknown,
+                };
+                record_history(
+                    self.history.as_ref(),
+                    id.as_ref(),
+                    Event::RunEnd {
+                        keys,
+                        program: program_name,
+                        termination,
+                    },
+                    err,
+                );
+                Ok(outcome.shell_code())
+            }
+            Err(ProcessError::Launch(inner)) => {
+                record_history(
+                    self.history.as_ref(),
+                    id.as_ref(),
+                    Event::RunFailure {
+                        keys,
+                        program: program_name,
+                        error: ErrorClass::Launch,
+                    },
+                    err,
+                );
+                let _ = writeln!(err, "failed to launch child process");
+                Err(ProcessError::Launch(inner).into())
+            }
+            Err(ProcessError::Wait(inner)) => {
+                record_history(
+                    self.history.as_ref(),
+                    id.as_ref(),
+                    Event::RunEnd {
+                        keys,
+                        program: program_name,
+                        termination: Termination::Unknown,
+                    },
+                    err,
+                );
+                Err(ProcessError::Wait(inner).into())
+            }
+        }
     }
 
-    fn handle_delete(&mut self, args: DeleteArgs, out: &mut dyn Write) -> Result<(), AppError> {
-        validate_env_name(&args.env_name)?;
-        let question = format!(
-            "Delete '{}' from kagitaba keychain entries? [y/N]: ",
-            args.env_name
+    fn handle_delete(
+        &mut self,
+        args: DeleteArgs,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+    ) -> Result<(), AppError> {
+        let id = history_id(err);
+        let mut key = None;
+        let result = (|| -> Result<Option<bool>, AppError> {
+            validate_env_name(&args.env_name)?;
+            key = KeyName::new(&args.env_name);
+            let question = format!(
+                "Delete '{}' from kagitaba keychain entries? [y/N]: ",
+                args.env_name
+            );
+            if !self.prompter.confirm(&question)? {
+                return Ok(None);
+            }
+            Ok(Some(self.store.delete(&args.env_name)?))
+        })();
+        let outcome = match &result {
+            Ok(Some(true)) => Outcome::Success,
+            Ok(Some(false)) => Outcome::Failure(ErrorClass::NotFound),
+            Ok(None) => Outcome::Aborted,
+            Err(error) => error_outcome(error),
+        };
+        record_history(
+            self.history.as_ref(),
+            id.as_ref(),
+            Event::Mutation {
+                operation: MutationOperation::Delete,
+                key,
+                outcome,
+            },
+            err,
         );
-        if !self.prompter.confirm(&question)? {
-            writeln!(out, "Aborted.").map_err(AppError::Io)?;
-            return Ok(());
-        }
-
-        if self.store.delete(&args.env_name)? {
-            writeln!(out, "Deleted '{}'.", args.env_name).map_err(AppError::Io)?;
-        } else {
-            writeln!(out, "'{}' not found.", args.env_name).map_err(AppError::Io)?;
+        match result? {
+            Some(true) => writeln!(out, "Deleted '{}'.", args.env_name)?,
+            Some(false) => writeln!(out, "'{}' not found.", args.env_name)?,
+            None => writeln!(out, "Aborted.")?,
         }
         Ok(())
+    }
+
+    fn handle_history(&mut self, args: HistoryArgs, out: &mut dyn Write) -> Result<(), AppError> {
+        match args.command {
+            Some(HistoryCommand::Enable) => print_settings(
+                self.history.configure(SettingsUpdate {
+                    enabled: Some(true),
+                    ..SettingsUpdate::default()
+                })?,
+                out,
+            )?,
+            Some(HistoryCommand::Disable) => print_settings(
+                self.history.configure(SettingsUpdate {
+                    enabled: Some(false),
+                    ..SettingsUpdate::default()
+                })?,
+                out,
+            )?,
+            Some(HistoryCommand::Config(config)) => {
+                let settings = if config.retention_days.is_none() && config.max_events.is_none() {
+                    self.history.settings()?
+                } else {
+                    self.history.configure(SettingsUpdate {
+                        retention_days: config.retention_days,
+                        max_events: config.max_events,
+                        enabled: None,
+                    })?
+                };
+                print_settings(settings, out)?;
+            }
+            Some(HistoryCommand::Clear) => {
+                if !self
+                    .prompter
+                    .confirm("Clear all kagitaba operation history? [y/N]: ")?
+                {
+                    writeln!(out, "Aborted.")?;
+                    return Ok(());
+                }
+                self.history.clear()?;
+                writeln!(out, "History cleared.")?;
+            }
+            Some(HistoryCommand::Reclaim) => {
+                self.history.reclaim()?;
+                writeln!(out, "History storage reclaimed.")?;
+            }
+            None => {
+                let key = args
+                    .key
+                    .as_deref()
+                    .map(|name| {
+                        validate_env_name(name)?;
+                        KeyName::new(name).ok_or(AppError::InvalidEnvName)
+                    })
+                    .transpose()?;
+                let entries = self.history.list(&Query {
+                    key,
+                    failed: args.failed,
+                    limit: args.limit,
+                })?;
+                if entries.is_empty() {
+                    writeln!(out, "No operation history.")?;
+                }
+                for entry in entries {
+                    print_entry(&entry, out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+const HISTORY_WARNING: &str = "warning: operation history could not be recorded.";
+
+fn history_id(err: &mut dyn Write) -> Option<OperationId> {
+    match OperationId::new() {
+        Ok(id) => Some(id),
+        Err(_) => {
+            let _ = writeln!(err, "{HISTORY_WARNING}");
+            None
+        }
+    }
+}
+
+fn record_history(
+    history: &dyn History,
+    id: Option<&OperationId>,
+    event: Event,
+    err: &mut dyn Write,
+) {
+    if let Some(id) = id
+        && history
+            .record(&Record {
+                operation_id: id.clone(),
+                event,
+            })
+            .is_err()
+    {
+        let _ = writeln!(err, "{HISTORY_WARNING}");
+    }
+}
+
+fn error_class(error: &AppError) -> ErrorClass {
+    match error {
+        AppError::InvalidEnvName | AppError::InvalidCommand(_) => ErrorClass::InvalidInput,
+        AppError::Store(error) => match error {
+            StoreError::NotFound => ErrorClass::NotFound,
+            StoreError::AccessDenied => ErrorClass::AccessDenied,
+            StoreError::OperationCanceled => ErrorClass::Canceled,
+            StoreError::InteractionUnavailable => ErrorClass::InteractionUnavailable,
+            StoreError::UnsupportedPlatform => ErrorClass::Unsupported,
+            StoreError::AlreadyExists | StoreError::Backend => ErrorClass::Backend,
+        },
+        AppError::Io(_) => ErrorClass::PromptIo,
+        AppError::Process(ProcessError::Launch(_)) => ErrorClass::Launch,
+        AppError::Process(ProcessError::Wait(_)) => ErrorClass::Wait,
+        AppError::History(_) => ErrorClass::Backend,
+    }
+}
+
+fn error_outcome(error: &AppError) -> Outcome {
+    let class = error_class(error);
+    if class == ErrorClass::Canceled {
+        Outcome::Aborted
+    } else {
+        Outcome::Failure(class)
+    }
+}
+
+fn mutation_outcome(result: &Result<bool, AppError>) -> Outcome {
+    match result {
+        Ok(true) => Outcome::Success,
+        Ok(false) => Outcome::Aborted,
+        Err(error) => error_outcome(error),
+    }
+}
+
+fn print_settings(settings: Settings, out: &mut dyn Write) -> io::Result<()> {
+    writeln!(out, "enabled: {}", settings.enabled)?;
+    writeln!(out, "retention_days: {}", settings.retention_days)?;
+    writeln!(out, "max_events: {}", settings.max_events)
+}
+
+fn print_entry(entry: &Entry, out: &mut dyn Write) -> io::Result<()> {
+    let timestamp =
+        time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(entry.utc_ms) * 1_000_000)
+            .ok()
+            .and_then(|date| {
+                date.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .unwrap_or_else(|| "unknown UTC".into());
+    write!(out, "{} {} ", timestamp, entry.operation_id.as_str())?;
+    match &entry.kind {
+        EntryKind::Mutation {
+            operation,
+            key,
+            outcome,
+        } => {
+            write!(
+                out,
+                "{operation:?} key={} ",
+                key.as_ref().map_or("-", KeyName::as_str)
+            )?;
+            match outcome {
+                Outcome::Success => writeln!(out, "success"),
+                Outcome::Aborted => writeln!(out, "aborted"),
+                Outcome::Failure(error) => writeln!(out, "failure={}", error.as_str()),
+            }
+        }
+        EntryKind::Run {
+            keys,
+            program,
+            result,
+        } => {
+            let names = keys
+                .iter()
+                .map(KeyName::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            write!(
+                out,
+                "Run program={} keys={} ",
+                program.as_ref().map_or("-", ProgramName::as_str),
+                names
+            )?;
+            match result {
+                RunResult::Failed(error) => writeln!(out, "failure={}", error.as_str()),
+                RunResult::Finished(termination) => {
+                    writeln!(out, "{}", termination_text(*termination))
+                }
+                RunResult::Unknown => writeln!(out, "unknown (no end recorded)"),
+                RunResult::EndOnly(termination) => {
+                    writeln!(out, "end-only {}", termination_text(*termination))
+                }
+            }
+        }
+    }
+}
+
+fn termination_text(termination: Termination) -> String {
+    match termination {
+        Termination::Exited(code) => format!("exit={code}"),
+        Termination::Signaled(signal) => format!("signal={signal}"),
+        Termination::Unknown => "unknown termination".into(),
     }
 }
 
@@ -234,6 +579,8 @@ pub enum AppError {
     Process(#[from] ProcessError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    History(#[from] HistoryError),
 }
 
 #[cfg(test)]

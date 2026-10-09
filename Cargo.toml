@@ -9,6 +9,10 @@ license = "MPL-2.0"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 rpassword = "7.3"
+getrandom = "0.4"
+time = { version = "0.3.55", features = ["formatting"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 thiserror = "2.0"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
