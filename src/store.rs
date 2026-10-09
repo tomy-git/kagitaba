@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! 秘密値の保持と資格情報ストアの境界。対話入力・上書き確認・結果表示はアプリ層の責務。
+
 #[cfg(any(target_os = "macos", test))]
 use std::collections::{BTreeSet, HashMap};
 
@@ -16,10 +18,13 @@ const SERVICE_NAME: &str = "dev.kagitaba.kagitaba";
 #[cfg(any(target_os = "macos", test))]
 const INDEX_ACCOUNT: &str = "__kagitaba_index__";
 
+// このバッファは解放時にゼロクリアする。OS や Rust のプロセス API 等が作る別のコピーまで
+// 完全に消去する保証はなく、子プログラムへ渡した後の値の扱いも子プログラムに委ねられる。
 pub struct Secret(Zeroizing<String>);
 
 impl std::fmt::Debug for Secret {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // デバッグ出力から値が漏れないよう、内容に関係なく固定の秘匿表記を返す。
         formatter.write_str("Secret([REDACTED])")
     }
 }

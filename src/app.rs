@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! 入力の検証・確認・結果表示を担当する。Keychain の保存先選択と操作はストア層に委ねる。
+
 use std::io::{self, BufRead, Write};
 
 use thiserror::Error;
@@ -18,6 +20,7 @@ pub struct StdioPrompter;
 
 impl Prompter for StdioPrompter {
     fn prompt_secret(&mut self, prompt: &str) -> Result<Secret, AppError> {
+        // 値はエコーしない対話入力で受け取り、保持したバッファを解放時に消去する Secret に渡す。
         let value = rpassword::prompt_password(prompt).map_err(AppError::Io)?;
         Ok(Secret::new(value))
     }
@@ -85,8 +88,10 @@ impl App {
     }
 
     fn handle_set(&mut self, args: SetArgs, out: &mut dyn Write) -> Result<(), AppError> {
+        // キー名を先に検証し、不正な入力では確認・秘密値の入力・ストアへのアクセスを行わない。
         validate_env_name(&args.env_name)?;
 
+        // 既存項目への上書きが拒否されたら、秘密値を入力させず書き込みも行わない。
         let replace_existing = self.store.exists(&args.env_name)?;
         if replace_existing && !self.confirm_replacement(&args.env_name, out)? {
             return Ok(());
@@ -96,12 +101,13 @@ impl App {
             .prompter
             .prompt_secret(&format!("Enter secret for {}: ", args.env_name))?;
         if replace_existing {
+            // 確認後に対象が消えていても、ストアは新規作成せず更新失敗を返す。
             self.store.replace(&args.env_name, &secret)?;
         } else {
             match self.store.create(&args.env_name, &secret) {
                 Ok(()) => {}
                 Err(StoreError::AlreadyExists) => {
-                    // Another invocation may have registered this name during input.
+                    // 入力中の同名登録競合でも、上書き確認を省略せず相手の値を保護する。
                     if !self.confirm_replacement(&args.env_name, out)? {
                         return Ok(());
                     }
@@ -110,11 +116,14 @@ impl App {
                 Err(error) => return Err(error.into()),
             }
         }
+        // 入力・確認・保存の失敗はここまで到達しない。「Stored」は保存 API の成功を示し、
+        // API 提供元でのキーの有効性確認や、保存後の読み戻し照合は行っていない。
         writeln!(out, "Stored '{}'.", args.env_name).map_err(AppError::Io)?;
         Ok(())
     }
 
     fn confirm_replacement(&mut self, name: &str, out: &mut dyn Write) -> Result<bool, AppError> {
+        // 明示的な肯定だけを上書き許可とし、確認の I/O 失敗も保存へ進めない。
         let question = format!("Entry '{name}' already exists. Replace it? [y/N]: ");
         if self.prompter.confirm(&question)? {
             Ok(true)
@@ -197,6 +206,7 @@ impl App {
 }
 
 fn validate_env_name(input: &str) -> Result<(), AppError> {
+    // 環境変数としての構文を制限し、拒否した入力自体はエラーへ含めない。
     let mut chars = input.chars();
     let Some(first) = chars.next() else {
         return Err(AppError::InvalidEnvName);

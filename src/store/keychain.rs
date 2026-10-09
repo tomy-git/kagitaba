@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! The store policy is shared with tests; only the OS calls require macOS.
+//! ローカル Login Keychain の操作を担当する。共通処理は OS 呼び出し境界のフェイクで検証し、
+//! 実際の macOS API への接続だけを NativeApi に分離する。入力や結果表示はここで行わない。
 
 use super::{CredentialStore, Secret, StoreError, extract_names, query};
 use std::collections::HashMap;
@@ -56,7 +57,7 @@ impl<A: KeychainApi> CredentialStore for KeychainStore<A> {
         match String::from_utf8(bytes) {
             Ok(value) => Ok(Secret::new(value)),
             Err(error) => {
-                // Invalid payloads are still secrets and must be erased.
+                // UTF-8 として不正な値も秘密として扱い、失敗時のバイト列を消去する。
                 drop(zeroize::Zeroizing::new(error.into_bytes()));
                 Err(StoreError::Backend)
             }
@@ -64,13 +65,14 @@ impl<A: KeychainApi> CredentialStore for KeychainStore<A> {
     }
 
     fn create(&self, account: &str, secret: &Secret) -> Result<(), StoreError> {
+        // 新規登録だけを行い、重複時の更新はしない。上書きの判断はアプリ層へ返す。
         let keychain = self.0.open()?;
         self.0.create(&keychain, account, secret).map_err(map_error)
     }
 
     fn replace(&self, account: &str, secret: &Secret) -> Result<(), StoreError> {
         let keychain = self.0.open()?;
-        // A disappeared item must remain missing, even after confirmation.
+        // 上書き確認済みでも対象消失は失敗とし、新規作成へ切り替えない。
         let mut item = self.0.find_item(&keychain, account).map_err(map_error)?;
         self.0.set_password(&mut item, secret).map_err(map_error)
     }
@@ -95,6 +97,7 @@ impl<A: KeychainApi> CredentialStore for KeychainStore<A> {
 }
 
 fn map_error(code: i32) -> StoreError {
+    // OS の失敗を固定の分類へ変換し、秘密値や未加工のエラー情報を表示層へ渡さない。
     match code {
         DUPLICATE => StoreError::AlreadyExists,
         NOT_FOUND => StoreError::NotFound,
@@ -114,6 +117,7 @@ impl KeychainApi for NativeApi {
     type Item = security_framework::os::macos::keychain_item::SecKeychainItem;
 
     fn open(&self) -> Result<Self::Keychain, StoreError> {
+        // 保存先はローカル Login Keychain を明示して選ぶ。既定や iCloud のストアに委ねない。
         let home = std::env::var("HOME").map_err(|_| StoreError::Backend)?;
         for name in ["login.keychain-db", "login.keychain"] {
             let path = std::path::Path::new(&home)
@@ -151,6 +155,7 @@ impl KeychainApi for NativeApi {
     }
 
     fn create(&self, keychain: &Self::Keychain, account: &str, secret: &Secret) -> Result<(), i32> {
+        // 専用サービス名とキー名の範囲で保存し、API の失敗を成功へ置き換えない。
         keychain
             .add_generic_password(super::SERVICE_NAME, account, secret.expose().as_bytes())
             .map_err(|error| error.code())
@@ -164,6 +169,7 @@ impl KeychainApi for NativeApi {
     }
 
     fn set_password(&self, item: &mut Self::Item, secret: &Secret) -> Result<(), i32> {
+        // 検索で得た既存項目だけを更新する。値の有効性確認や保存後照合は別の処理であり未実施。
         item.set_password(secret.expose().as_bytes())
             .map_err(|error| error.code())
     }
