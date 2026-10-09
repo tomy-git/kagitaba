@@ -431,3 +431,72 @@ fn status_errors_do_not_report_registration_or_empty_success() {
         }
     }
 }
+
+#[test]
+fn stdio_confirmation_accepts_only_explicit_yes_and_rejects_eof() {
+    for (answer, accepted) in [
+        ("y\n", true),
+        ("YES\n", true),
+        ("  Yes \r\n", true),
+        ("n\n", false),
+        ("\n", false),
+        ("", false),
+        ("yes please\n", false),
+    ] {
+        let mut input = std::io::Cursor::new(answer.as_bytes());
+        let mut output = Vec::new();
+        assert_eq!(
+            confirm_with_io("Confirm? ", &mut input, &mut output).unwrap(),
+            accepted
+        );
+        assert_eq!(output, b"Confirm? ");
+    }
+}
+
+struct FailedInput;
+
+impl std::io::Read for FailedInput {
+    fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+impl std::io::BufRead for FailedInput {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+    fn consume(&mut self, _: usize) {}
+}
+
+struct FailedOutput {
+    fail_flush: bool,
+}
+
+impl Write for FailedOutput {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.fail_flush {
+            Ok(data.len())
+        } else {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+#[test]
+fn stdio_confirmation_propagates_read_write_and_flush_errors() {
+    let result = confirm_with_io("Confirm? ", &mut FailedInput, &mut Vec::new());
+    assert!(
+        matches!(result, Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe)
+    );
+    for fail_flush in [false, true] {
+        let mut input = std::io::Cursor::new(b"yes\n");
+        let result = confirm_with_io("Confirm? ", &mut input, &mut FailedOutput { fail_flush });
+        assert!(
+            matches!(result, Err(AppError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+        assert_eq!(input.position(), 0);
+    }
+}
